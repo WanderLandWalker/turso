@@ -69,6 +69,9 @@ pub struct MaterializedViewCursor {
 
     // State machine for seek operations
     seek_state: SeekState,
+
+    // Set by NullRow: the cursor reads as a row of NULLs until it is positioned again
+    null_flag: bool,
 }
 
 impl MaterializedViewCursor {
@@ -88,6 +91,7 @@ impl MaterializedViewCursor {
             current_row: None,
             execute_state: ExecuteState::Uninitialized,
             seek_state: SeekState::Init,
+            null_flag: false,
         })
     }
 
@@ -309,6 +313,7 @@ impl MaterializedViewCursor {
     }
 
     pub fn seek(&mut self, key: SeekKey, op: SeekOp) -> IOResultOr<SeekResult> {
+        self.null_flag = false;
         // Ensure transaction changes are computed
         return_if_io!(self.ensure_tx_changes_computed());
 
@@ -326,6 +331,7 @@ impl MaterializedViewCursor {
     }
 
     pub fn next(&mut self) -> IOResultOr<bool> {
+        self.null_flag = false;
         // If there's a pending seek operation (due to IO), complete it first.
         // SeekState::Seek or SeekState::Advancing means IO was interrupted mid-seek and we need to resume.
         // SeekState::Init means cursor was never positioned - don't resume, fall through to check current_row.
@@ -350,6 +356,9 @@ impl MaterializedViewCursor {
     }
 
     pub fn column(&mut self, col: usize) -> IOResultOr<Value> {
+        if self.null_flag {
+            return Ok(IOResult::Done(Value::Null));
+        }
         if let Some((_, ref values)) = self.current_row {
             Ok(IOResult::Done(
                 values.get(col).cloned().unwrap_or(Value::Null),
@@ -360,14 +369,26 @@ impl MaterializedViewCursor {
     }
 
     pub fn rowid(&self) -> IOResultOr<Option<i64>> {
+        if self.null_flag {
+            return Ok(IOResult::Done(None));
+        }
         Ok(IOResult::Done(self.current_row.as_ref().map(|(id, _)| *id)))
     }
 
     pub fn rewind(&mut self) -> IOResultOr<()> {
+        self.null_flag = false;
         return_if_io!(self.ensure_tx_changes_computed());
         // Seek GT from i64::MIN to find the first row using internal do_seek
         let _result = return_if_io!(self.do_seek(i64::MIN, SeekOp::GT));
         Ok(IOResult::Done(()))
+    }
+
+    pub fn set_null_flag(&mut self, flag: bool) {
+        self.null_flag = flag;
+    }
+
+    pub fn get_null_flag(&self) -> bool {
+        self.null_flag
     }
 
     pub fn is_valid(&self) -> Result<bool> {
